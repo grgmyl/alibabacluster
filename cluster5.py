@@ -5,7 +5,6 @@ import seaborn as sns
 from pathlib import Path
 from sklearn.preprocessing import MinMaxScaler
 from statsmodels.tsa.seasonal import seasonal_decompose
-from statsmodels.graphics.tsaplots import plot_acf
 
 
 BASE_DIR = Path(__file__).parent

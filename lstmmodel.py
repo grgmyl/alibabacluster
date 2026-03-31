@@ -2,168 +2,269 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
+
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import mean_squared_error, mean_absolute_error
+
 import torch
 import torch.nn as nn
 from torch.utils.data import TensorDataset, DataLoader
 
-BASE_DIR = Path(__file__).parent
 
-# ─────────────────────────────────────────
-# 1. LOAD & PREPROCESS
-# ─────────────────────────────────────────
-cols = ['id', 'timestamp', 'machine_id', 'cpu_usage', 'memory_usage']
-df = pd.read_csv(BASE_DIR / "Node_0.csv", names=cols)
+# Paths / device
 
-df = df.drop_duplicates()
-df[['cpu_usage', 'memory_usage']] = df[['cpu_usage', 'memory_usage']].apply(pd.to_numeric, errors='coerce')
-df = df.interpolate(method='linear').bfill().ffill()
+BASE_DIR = Path("/content/drive/MyDrive/project_5G")
+FILE_PATH = BASE_DIR / "lstm_ready_aggregated.csv"
 
-for col in ['cpu_usage', 'memory_usage']:
-    Q1  = df[col].quantile(0.25)
-    Q3  = df[col].quantile(0.75)
-    IQR = Q3 - Q1
-    df  = df[(df[col] >= Q1 - 1.5 * IQR) & (df[col] <= Q3 + 1.5 * IQR)]
-
-scaler = MinMaxScaler()
-df[['cpu_usage', 'memory_usage']] = scaler.fit_transform(df[['cpu_usage', 'memory_usage']])
-
-data   = df.groupby('timestamp')[['cpu_usage', 'memory_usage']].mean()
-data   = data.reset_index(drop=True)
-values = data.values  # shape: (T, 2)
-
-print(f"Dataset size: {len(values)} timesteps")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print("Using device:", device)
+if torch.cuda.is_available():
+    print("GPU:", torch.cuda.get_device_name(0))
 
 
-# ─────────────────────────────────────────
-# 2. CREATE SEQUENCES
-# ─────────────────────────────────────────
+df = pd.read_csv(FILE_PATH)
+
+print(df.head())
+print(df.columns.tolist())
+
+features = ["cpu_usage", "memory_usage"]
+values = df[features].values.astype(np.float32)
+
+print("Dataset size:", len(values))
+
+
 def create_sequences(data, lookback, horizon):
     X, y = [], []
     for i in range(len(data) - lookback - horizon + 1):
-        X.append(data[i : i + lookback])
-        y.append(data[i + lookback : i + lookback + horizon])
-    return np.array(X), np.array(y)
+        X.append(data[i:i + lookback])
+        y.append(data[i + lookback:i + lookback + horizon])
+    return np.array(X, dtype=np.float32), np.array(y, dtype=np.float32)
 
+def inverse_3d(arr, scaler):
+    n, h, f = arr.shape
+    flat = arr.reshape(-1, f)
+    inv = scaler.inverse_transform(flat)
+    return inv.reshape(n, h, f)
 
-# ─────────────────────────────────────────
-# 3. LSTM MODEL
-# ─────────────────────────────────────────
+def mape(y_true, y_pred, eps=1e-8):
+    return np.mean(np.abs((y_true - y_pred) / (np.abs(y_true) + eps))) * 100
+
+def evaluate_metrics(y_true, y_pred):
+    y_true_flat = y_true.reshape(-1)
+    y_pred_flat = y_pred.reshape(-1)
+
+    mse_val = mean_squared_error(y_true_flat, y_pred_flat)
+    mae_val = mean_absolute_error(y_true_flat, y_pred_flat)
+    mape_val = mape(y_true_flat, y_pred_flat)
+
+    return mse_val, mae_val, mape_val
+
+# =========================
+# LSTM Model
+# =========================
 class LSTMModel(nn.Module):
-    def __init__(self, horizon):
+    def __init__(self, input_size=2, hidden_size=64, num_layers=2, dropout=0.2, horizon=5):
         super().__init__()
-        self.lstm = nn.LSTM(input_size=2, hidden_size=64, num_layers=2,
-                            batch_first=True, dropout=0.2)
-        self.fc      = nn.Linear(64, horizon * 2)
         self.horizon = horizon
+        self.input_size = input_size
+
+        self.lstm = nn.LSTM(
+            input_size=input_size,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            batch_first=True,
+            dropout=dropout
+        )
+
+        self.fc = nn.Linear(hidden_size, horizon * input_size)
 
     def forward(self, x):
         out, _ = self.lstm(x)
-        out     = out[:, -1, :]
-        out     = self.fc(out)
-        return out.view(-1, self.horizon, 2)
+        out = out[:, -1, :]
+        out = self.fc(out)
+        return out.view(-1, self.horizon, self.input_size)
 
 
-# ─────────────────────────────────────────
-# 4. MAPE
-# ─────────────────────────────────────────
-def mape(y_true, y_pred):
-    return np.mean(np.abs((y_true - y_pred) / (y_true + 1e-8))) * 100
+LOOKBACK = 24
+EPOCHS = 40
+BATCH_SIZE = 16
+LR = 1e-3
+
+horizons = {
+    "Short (H=5)": 5,
+    "Long (H=10)": 10
+}
 
 
-# ─────────────────────────────────────────
-# 5. RUN FOR SHORT AND LONG HORIZON
-# ─────────────────────────────────────────
-LOOKBACK = 10
-EPOCHS   = 100     # more epochs = better learning
-split    = int(len(values) * 0.8)
-train    = values[:split]
-test     = values[split:]
+# Train / Test split
 
-horizons = {'Short (H=5)': 5, 'Long (H=10)': 10}
+n = len(values)
+train_end = int(n * 0.80)
+
+train_raw = values[:train_end]
+test_raw = values[train_end:]
+
+print("Train size:", len(train_raw))
+print("Test size :", len(test_raw))
+
+all_results = []
 
 for name, horizon in horizons.items():
-    print(f"\n{'='*40}")
-    print(f"  {name}")
-    print(f"{'='*40}")
+    print(f"\n{'='*50}")
+    print(name)
+    print(f"{'='*50}")
 
-    X_train, y_train = create_sequences(train, LOOKBACK, horizon)
-    X_test,  y_test  = create_sequences(test,  LOOKBACK, horizon)
+  
+    # Scaling: 
+    
+    scaler = MinMaxScaler()
+    train_scaled = scaler.fit_transform(train_raw)
+    test_scaled = scaler.transform(test_raw)
 
-    print(f"  Train sequences: {len(X_train)}, Test sequences: {len(X_test)}")
+   
+    # sequences
 
-    X_train = torch.tensor(X_train, dtype=torch.float32)
-    y_train = torch.tensor(y_train, dtype=torch.float32)
-    X_test  = torch.tensor(X_test,  dtype=torch.float32)
-    y_test  = torch.tensor(y_test,  dtype=torch.float32)
+    X_train, y_train = create_sequences(train_scaled, LOOKBACK, horizon)
+    X_test, y_test = create_sequences(test_scaled, LOOKBACK, horizon)
 
-    # DataLoader — trains in small batches, much faster and more stable
-    loader = DataLoader(TensorDataset(X_train, y_train), batch_size=32, shuffle=True)
+    print("X_train:", X_train.shape, "y_train:", y_train.shape)
+    print("X_test :", X_test.shape, "y_test :", y_test.shape)
 
-    model     = LSTMModel(horizon)
+   
+    # Tensors / loaders
+  
+    X_train_t = torch.tensor(X_train, dtype=torch.float32)
+    y_train_t = torch.tensor(y_train, dtype=torch.float32)
+    X_test_t = torch.tensor(X_test, dtype=torch.float32)
+
+    train_loader = DataLoader(
+        TensorDataset(X_train_t, y_train_t),
+        batch_size=BATCH_SIZE,
+        shuffle=True
+    )
+
+ 
+    # Model / loss / optimizer
+ 
+    model = LSTMModel(horizon=horizon).to(device)
     criterion = nn.MSELoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    optimizer = torch.optim.Adam(model.parameters(), lr=LR)
 
-    # Training loop
     train_losses = []
+
+   
+    # Training
+  
     for epoch in range(1, EPOCHS + 1):
         model.train()
-        epoch_loss = 0
-        for X_batch, y_batch in loader:
+        epoch_loss = 0.0
+
+        for X_batch, y_batch in train_loader:
+            X_batch = X_batch.to(device)
+            y_batch = y_batch.to(device)
+
             optimizer.zero_grad()
             preds = model(X_batch)
-            loss  = criterion(preds, y_batch)
+            loss = criterion(preds, y_batch)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
-            epoch_loss += loss.item()
-        avg_loss = epoch_loss / len(loader)
-        train_losses.append(avg_loss)
-        if epoch % 10 == 0:
-            print(f"  Epoch {epoch}/{EPOCHS}  |  Loss: {avg_loss:.6f}")
 
+            epoch_loss += loss.item()
+
+        train_loss = epoch_loss / len(train_loader)
+        train_losses.append(train_loss)
+
+        print(f"Epoch {epoch:02d}/{EPOCHS} | Train Loss: {train_loss:.6f}")
+
+   
     # Predictions
+  
     model.eval()
     with torch.no_grad():
-        test_preds = model(X_test).numpy()
-    test_true = y_test.numpy()
+        preds_test = model(X_test_t.to(device)).cpu().numpy()
 
+    y_test_inv = inverse_3d(y_test, scaler)
+    preds_test_inv = inverse_3d(preds_test, scaler)
+
+  
     # Metrics
-    mse_val  = mean_squared_error(test_true.reshape(-1), test_preds.reshape(-1))
-    mae_val  = mean_absolute_error(test_true.reshape(-1), test_preds.reshape(-1))
-    mape_val = mape(test_true.reshape(-1), test_preds.reshape(-1))
+  
+    mse_val, mae_val, mape_val = evaluate_metrics(y_test_inv, preds_test_inv)
 
-    print(f"\n  MSE  : {mse_val:.6f}")
-    print(f"  MAE  : {mae_val:.6f}")
-    print(f"  MAPE : {mape_val:.2f}%")
+    print("\nOverall metrics")
+    print(f"MSE  : {mse_val:.6f}")
+    print(f"MAE  : {mae_val:.6f}")
+    print(f"MAPE : {mape_val:.2f}%")
 
-    # ── Plot: Actual vs Predicted ──
+    all_results.append({
+        "Horizon": name,
+        "Model": "LSTM",
+        "MSE": mse_val,
+        "MAE": mae_val,
+        "MAPE (%)": mape_val
+    })
+
+    # per-feature metrics
+    for i, feat in enumerate(features):
+        feat_mse = mean_squared_error(
+            y_test_inv[:, :, i].reshape(-1),
+            preds_test_inv[:, :, i].reshape(-1)
+        )
+        feat_mae = mean_absolute_error(
+            y_test_inv[:, :, i].reshape(-1),
+            preds_test_inv[:, :, i].reshape(-1)
+        )
+        feat_mape = mape(
+            y_test_inv[:, :, i].reshape(-1),
+            preds_test_inv[:, :, i].reshape(-1)
+        )
+
+        print(f"\n{feat} metrics")
+        print(f"  MSE  : {feat_mse:.6f}")
+        print(f"  MAE  : {feat_mae:.6f}")
+        print(f"  MAPE : {feat_mape:.2f}%")
+
+   
+    # Plot predictions
+   
     fig, axes = plt.subplots(2, 1, figsize=(12, 6))
-    fig.suptitle(f'LSTM — {name}', fontsize=13, fontweight='bold')
+    fig.suptitle(f"LSTM Forecast — {name}", fontsize=13, fontweight='bold')
 
-    labels = ['CPU Usage', 'Memory Usage']
-    colors = [('blue', 'red'), ('orange', 'green')]
+    labels = ["CPU Usage", "Memory Usage"]
 
     for i in range(2):
-        axes[i].plot(test_true[:100, 0, i],  color=colors[i][0], label='Actual',    linewidth=1.2)
-        axes[i].plot(test_preds[:100, 0, i], color=colors[i][1], label='Predicted', linewidth=1.2, linestyle='--')
+        axes[i].plot(y_test_inv[:80, 0, i], label="Actual", linewidth=1.3)
+        axes[i].plot(preds_test_inv[:80, 0, i], "--", label="Predicted", linewidth=1.3)
         axes[i].set_title(labels[i])
-        axes[i].set_ylabel('Normalized Value')
+        axes[i].set_ylabel("Value")
         axes[i].legend()
         axes[i].grid(True, alpha=0.3)
 
-    axes[1].set_xlabel('Test Sample Index')
+    axes[1].set_xlabel("Test Sample Index")
     plt.tight_layout()
-    plt.savefig(BASE_DIR / f"lstm_{name.split()[0].lower()}.png", dpi=100)
+    plt.savefig(BASE_DIR / f"lstm_forecast_{name.split()[0].lower()}.png", dpi=120)
     plt.show()
 
-    # ── Plot: Training loss ──
+   
+    # Plot
+  
     plt.figure(figsize=(8, 4))
-    plt.plot(train_losses, color='steelblue', linewidth=1.5)
-    plt.title(f'Training Loss — {name}', fontweight='bold')
-    plt.xlabel('Epoch')
-    plt.ylabel('MSE Loss')
+    plt.plot(train_losses, label="Train Loss")
+    plt.title(f"LSTM Training Curve — {name}", fontweight='bold')
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.legend()
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
-    plt.savefig(BASE_DIR / f"lstm_loss_{name.split()[0].lower()}.png", dpi=100)
+    plt.savefig(BASE_DIR / f"lstm_loss_{name.split()[0].lower()}.png", dpi=120)
     plt.show()
+
+
+#results
+
+results_df = pd.DataFrame(all_results)
+print("\nFinal results:")
+print(results)
+
+results_df.to_csv(BASE_DIR / "lstm_results.csv", index=False)

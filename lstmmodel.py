@@ -59,9 +59,9 @@ def evaluate_metrics(y_true, y_pred):
 
     return mse_val, mae_val, mape_val
 
-# =========================
+
 # LSTM Model
-# =========================
+
 class LSTMModel(nn.Module):
     def __init__(self, input_size=2, hidden_size=64, num_layers=2, dropout=0.2, horizon=5):
         super().__init__()

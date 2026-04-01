@@ -24,7 +24,7 @@ LR         = 1e-3  # learning rate for the optimizer
 # We test two forecast horizons
 HORIZONS = {
     "Short (H=5)":  5,
-    "Long (H=10)": 10
+    "Long (H=10)": 15
 }
 
 # Plot colors

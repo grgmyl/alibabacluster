@@ -11,44 +11,44 @@ import torch.nn as nn
 from torch.utils.data import TensorDataset, DataLoader
 
 
-# 1. SETTINGS
+#SETTINGS
 
 BASE_DIR  = Path("/content/drive/MyDrive/project_5G")
 FILE_PATH = BASE_DIR / "lstm_ready_aggregated.csv"
 
-LOOKBACK   = 24    # how many past time steps the model sees
-EPOCHS     = 40    # how many times we train over the full dataset
-BATCH_SIZE = 16    # how many samples per training step
-LR         = 1e-3  # learning rate for the optimizer
+LOOKBACK   = 24
+EPOCHS     = 40
+BATCH_SIZE = 16
+LR         = 1e-3
 
-# We test two forecast horizons
-HORIZONS = {
-    "Short (H=5)":  5,
-    "Long (H=10)": 15
+# Early stopping settings
+PATIENCE   = 7     # stop if val loss doesn't improve for 7 consecutive epochs
+MIN_DELTA  = 1e-6  # minimum improvement to count as "better"
+
+HORIZONS_CONFIG = {
+    "Short (H=5)":  {"horizon": 5,  "patience": 12},
+    "Long (H=10)":  {"horizon": 10, "patience": 6},
 }
 
-# Plot colors
-COLOR_ACTUAL    = "#17BECF"   # teal       → actual values
-COLOR_PREDICTED = "#FF4500"   # orange-red → predicted values
-COLOR_TRAIN     = "#2ECC71"   # green      → training loss curve
-COLOR_VAL       = "#E74C3C"   # red        → validation loss curve
+COLOR_ACTUAL    = "#6A0DAD" # Ultra Violet
+COLOR_PREDICTED = "#FF69B4" # Vibrant Pink
+COLOR_TRAIN     = "#8A2BE2" # Blue-violet
+COLOR_VAL       = "#FFC0CB" # Light Pink
 
-# Use GPU if available, otherwise CPU
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("Using device:", device)
 
 
-# 2. LOAD DATA  (CPU usage only)
+#LOAD DATA
 
 df = pd.read_csv(FILE_PATH)
 print(df.head())
 
-# Keep only the cpu_usage column and convert to float32
 cpu_values = df[["cpu_usage"]].values.astype(np.float32)
 print("Total samples:", len(cpu_values))
 
 
-# 3. HELPER FUNCTIONS
+#HELPER FUNCTIONS
 
 def create_sequences(data, lookback, horizon):
     X, y = [], []
@@ -60,9 +60,9 @@ def create_sequences(data, lookback, horizon):
 
 def inverse_scale(arr, scaler):
     n, h, f = arr.shape
-    flat = arr.reshape(-1, f)           # flatten to 2D for the scaler
+    flat = arr.reshape(-1, f)
     inv  = scaler.inverse_transform(flat)
-    return inv.reshape(n, h, f)         # restore original shape
+    return inv.reshape(n, h, f)
 
 
 def compute_mape(y_true, y_pred, eps=1e-8):
@@ -85,34 +85,30 @@ def print_metrics(y_true, y_pred, label=""):
     return mse, mae, mape
 
 
-# 4. LSTM MODEL
+#LSTM MODEL
 
 class LSTMModel(nn.Module):
     def __init__(self, horizon):
         super().__init__()
         self.horizon = horizon
 
-        # The LSTM layer processes the input sequence
         self.lstm = nn.LSTM(
-            input_size=1,       # one feature: cpu_usage
-            hidden_size=64,     # size of the hidden state
-            num_layers=2,       # two stacked LSTM layers
-            batch_first=True,   # input shape: (batch, time, features)
-            dropout=0.2         # dropout between LSTM layers to reduce overfitting
+            input_size=1,
+            hidden_size=64,
+            num_layers=2,
+            batch_first=True,
+            dropout=0.2
         )
-
-        # Fully connected layer maps the last hidden state to predictions
-        # We predict 'horizon' future steps, each with 1 value (cpu)
         self.fc = nn.Linear(64, horizon * 1)
 
     def forward(self, x):
-        out, _ = self.lstm(x)                 # out shape: (batch, time, hidden_size)
-        out = out[:, -1, :]                   # take only the last time step
-        out = self.fc(out)                    # shape: (batch, horizon)
-        return out.view(-1, self.horizon, 1)  # reshape to (batch, horizon, 1)
+        out, _ = self.lstm(x)
+        out = out[:, -1, :]
+        out = self.fc(out)
+        return out.view(-1, self.horizon, 1)
 
 
-# 5. TRAIN / VALIDATION / TEST SPLIT  (80% / 10% / 10%)
+# TRAIN / VALIDATION / TEST SPLIT
 
 n         = len(cpu_values)
 train_end = int(n * 0.80)
@@ -125,41 +121,39 @@ test_raw  = cpu_values[val_end:]
 print(f"\nTrain: {len(train_raw)} | Val: {len(val_raw)} | Test: {len(test_raw)}")
 
 
-# 6. MAIN TRAINING LOOP  (one run per horizon)
+#MAIN TRAINING LOOP
 
 all_results = []
 
-for horizon_name, horizon in HORIZONS.items():
+for horizon_name, horizon_data in HORIZONS_CONFIG.items():
     print(f"\nHorizon: {horizon_name}")
 
-    #  Scale data fit ONLY on train 
+    horizon = horizon_data["horizon"]
+    patience = horizon_data["patience"]
+
     scaler       = MinMaxScaler()
     train_scaled = scaler.fit_transform(train_raw)
     val_scaled   = scaler.transform(val_raw)
     test_scaled  = scaler.transform(test_raw)
 
-    #  Create sequences 
     X_train, y_train = create_sequences(train_scaled, LOOKBACK, horizon)
     X_val,   y_val   = create_sequences(val_scaled,   LOOKBACK, horizon)
     X_test,  y_test  = create_sequences(test_scaled,  LOOKBACK, horizon)
 
     print(f"X_train: {X_train.shape} | X_val: {X_val.shape} | X_test: {X_test.shape}")
 
-    #  Convert to PyTorch tensors 
     X_train_t = torch.tensor(X_train)
     y_train_t = torch.tensor(y_train)
     X_val_t   = torch.tensor(X_val)
     y_val_t   = torch.tensor(y_val)
     X_test_t  = torch.tensor(X_test)
 
-    # DataLoader 
     train_loader = DataLoader(
         TensorDataset(X_train_t, y_train_t),
         batch_size=BATCH_SIZE,
         shuffle=True
     )
 
-    # Initialize model, loss function, optimizer 
     model     = LSTMModel(horizon=horizon).to(device)
     criterion = nn.MSELoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=LR)
@@ -167,7 +161,13 @@ for horizon_name, horizon in HORIZONS.items():
     train_losses = []
     val_losses   = []
 
-    # Training loop 
+    # Early stopping state 
+    best_val_loss    = float('inf')
+    patience_counter = 0
+    best_epoch       = 0
+    best_model_path  = BASE_DIR / f"best_model_{horizon_name.split()[0].lower()}.pt"
+
+    # Training loop
     for epoch in range(1, EPOCHS + 1):
 
         # Training phase
@@ -178,48 +178,65 @@ for horizon_name, horizon in HORIZONS.items():
             X_batch = X_batch.to(device)
             y_batch = y_batch.to(device)
 
-            optimizer.zero_grad()                                     # reset gradients
-            predictions = model(X_batch)                              # forward pass
-            loss = criterion(predictions, y_batch)                    # compute loss
-            loss.backward()                                           # backpropagation
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)  # prevent exploding gradients
-            optimizer.step()                                          # update weights
+            optimizer.zero_grad()
+            predictions = model(X_batch)
+            loss = criterion(predictions, y_batch)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
 
             epoch_loss += loss.item()
 
         train_loss = epoch_loss / len(train_loader)
         train_losses.append(train_loss)
 
-        # Validation phase (no gradient computation)
+        # Validation phase
         model.eval()
         with torch.no_grad():
             val_preds = model(X_val_t.to(device))
             val_loss  = criterion(val_preds, y_val_t.to(device)).item()
         val_losses.append(val_loss)
 
-        print(f"  Epoch {epoch:02d}/{EPOCHS} | Train Loss: {train_loss:.6f} | Val Loss: {val_loss:.6f}")
+        print(f"  Epoch {epoch:02d}/{EPOCHS} | Train Loss: {train_loss:.6f} | Val Loss: {val_loss:.6f}", end="")
 
-    # --- Predict on test set ---
+        # Early stopping check 
+        if val_loss < best_val_loss - MIN_DELTA:
+            best_val_loss    = val_loss
+            patience_counter = 0
+            best_epoch       = epoch
+            torch.save(model.state_dict(), best_model_path)  # save best weights
+            print("  ✓ best model saved")
+        else:
+            patience_counter += 1
+            print(f"  (no improvement {patience_counter}/{patience})")
+            if patience_counter >= patience:
+                print(f"\n  ⚑ Early stopping triggered at epoch {epoch}. Best epoch: {best_epoch}")
+                break
+
+    # Restore best weights before evaluating on test set
+    model.load_state_dict(torch.load(best_model_path))
+    print(f"  Restored best model from epoch {best_epoch} (val loss: {best_val_loss:.6f})")
+
+    # Predict on test set
     model.eval()
     with torch.no_grad():
         test_preds = model(X_test_t.to(device)).cpu().numpy()
 
-    # Convert predictions and targets back to original scale
-    y_test_inv     = inverse_scale(y_test,      scaler)
-    preds_test_inv = inverse_scale(test_preds,  scaler)
+    y_test_inv     = inverse_scale(y_test,     scaler)
+    preds_test_inv = inverse_scale(test_preds, scaler)
 
-    # --- Print metrics ---
     mse, mae, mape = print_metrics(y_test_inv, preds_test_inv, label="CPU Usage")
 
     all_results.append({
-        "Horizon"  : horizon_name,
-        "Model"    : "LSTM",
-        "MSE"      : mse,
-        "MAE"      : mae,
-        "MAPE (%)" : mape
+        "Horizon"    : horizon_name,
+        "Model"      : "LSTM",
+        "Best Epoch" : best_epoch,
+        "MSE"        : mse,
+        "MAE"        : mae,
+        "MAPE (%)"   : mape
     })
 
-    # PLOT 1: Actual vs Predicted (CPU Usage)
+    # PLOT 1: Actual vs Predicted
     fig, ax = plt.subplots(figsize=(12, 4))
 
     ax.plot(y_test_inv[:80, 0, 0],     label="Actual",    color=COLOR_ACTUAL,    linewidth=1.5)
@@ -235,13 +252,14 @@ for horizon_name, horizon in HORIZONS.items():
     plt.savefig(BASE_DIR / f"lstm_forecast_{horizon_name.split()[0].lower()}.png", dpi=120)
     plt.show()
 
-    
     # PLOT 2: Training & Validation Loss
-     
     plt.figure(figsize=(8, 4))
 
     plt.plot(train_losses, label="Train Loss", color=COLOR_TRAIN, linewidth=1.5)
     plt.plot(val_losses,   label="Val Loss",   color=COLOR_VAL,   linewidth=1.5, linestyle="--")
+
+    # Mark the best epoch on the loss plot
+    plt.axvline(x=best_epoch - 1, color="gray", linestyle=":", linewidth=1.2, label=f"Best epoch ({best_epoch})")
 
     plt.title(f"Training & Validation Loss — {horizon_name}", fontsize=13, fontweight="bold")
     plt.xlabel("Epoch")

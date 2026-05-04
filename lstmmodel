@@ -27,7 +27,7 @@ MIN_DELTA  = 1e-6  # minimum improvement to count as "better"
 
 HORIZONS_CONFIG = {
     "Short (H=5)":  {"horizon": 5,  "patience": 12},
-    "Long (H=10)":  {"horizon": 10, "patience": 6},
+    "Long (H=10)":  {"horizon": 15, "patience": 6},
 }
 
 COLOR_ACTUAL    = "#6A0DAD" # Ultra Violet

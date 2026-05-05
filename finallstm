@@ -17,11 +17,11 @@ BASE_DIR  = Path("/content/drive/MyDrive/project_5G")
 FILE_PATH = BASE_DIR / "lstm_ready_aggregated.csv"
 
 LOOKBACK   = 24
-EPOCHS     = 40        # same as GRU
+EPOCHS     = 40     
 BATCH_SIZE = 32
 LR         = 1e-3
 
-PATIENCE  = 10         # same for both horizons (was 12 / 6)
+PATIENCE  = 10        
 MIN_DELTA = 1e-6
 
 HORIZONS_CONFIG = {

@@ -11,29 +11,29 @@ import torch.nn as nn
 from torch.utils.data import TensorDataset, DataLoader
 
 
-#SETTINGS
+#settings
 
 BASE_DIR  = Path("/content/drive/MyDrive/project_5G")
 FILE_PATH = BASE_DIR / "lstm_ready_aggregated.csv"
 
 LOOKBACK   = 24
-EPOCHS     = 40
+EPOCHS     = 60
 BATCH_SIZE = 32
 LR         = 1e-3
 
-# Early stopping settings
+# Early stopping 
 PATIENCE   = 7     # stop if val loss doesn't improve for 7 consecutive epochs
 MIN_DELTA  = 1e-6  # minimum improvement to count as "better"
 
 HORIZONS_CONFIG = {
     "Short (H=5)":  {"horizon": 5,  "patience": 12},
-    "Long (H=10)":  {"horizon": 15, "patience": 6},
+    "Long (H=10)":  {"horizon": 10, "patience": 6},
 }
 
-COLOR_ACTUAL    = "#6A0DAD" # Ultra Violet
-COLOR_PREDICTED = "#FF69B4" # Vibrant Pink
-COLOR_TRAIN     = "#8A2BE2" # Blue-violet
-COLOR_VAL       = "#FFC0CB" # Light Pink
+COLOR_ACTUAL    = "#6A0DAD" 
+COLOR_PREDICTED = "#FF69B4" 
+COLOR_TRAIN     = "#8A2BE2" 
+COLOR_VAL       = "#FFC0CB"
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("Using device:", device)
@@ -160,7 +160,7 @@ for horizon_name, horizon_data in HORIZONS_CONFIG.items():
     train_losses = []
     val_losses   = []
 
-    # Early stopping state 
+    # Early stopping state
     best_val_loss    = float('inf')
     patience_counter = 0
     best_epoch       = 0
@@ -198,7 +198,7 @@ for horizon_name, horizon_data in HORIZONS_CONFIG.items():
 
         print(f"  Epoch {epoch:02d}/{EPOCHS} | Train Loss: {train_loss:.6f} | Val Loss: {val_loss:.6f}", end="")
 
-        # Early stopping check 
+        # Early stopping check
         if val_loss < best_val_loss - MIN_DELTA:
             best_val_loss    = val_loss
             patience_counter = 0

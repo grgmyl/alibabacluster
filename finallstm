@@ -42,7 +42,6 @@ print("Using device:", device)
 #LOAD DATA
 
 df = pd.read_csv(FILE_PATH)
-print(df.head())
 
 cpu_values = df[["cpu_usage"]].values.astype(np.float32)
 print("Total samples:", len(cpu_values))

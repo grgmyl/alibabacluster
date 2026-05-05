@@ -15,7 +15,7 @@ FILE_PATH = BASE_DIR / "lstm_ready_aggregated.csv"
 df = pd.read_csv(FILE_PATH)
 data = df[['cpu_usage', 'memory_usage']].values
 
-SEQ_LEN = 20
+SEQ_LEN = 24
 EPOCHS = 40
 
 BATCH_SIZE = 32

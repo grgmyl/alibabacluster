@@ -18,7 +18,7 @@ FILE_PATH = BASE_DIR / "lstm_ready_aggregated.csv"
 
 LOOKBACK   = 24
 EPOCHS     = 40
-BATCH_SIZE = 16
+BATCH_SIZE = 32
 LR         = 1e-3
 
 # Early stopping settings

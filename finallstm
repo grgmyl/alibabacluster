@@ -11,43 +11,41 @@ import torch.nn as nn
 from torch.utils.data import TensorDataset, DataLoader
 
 
-#settings
+# Settings
 
 BASE_DIR  = Path("/content/drive/MyDrive/project_5G")
 FILE_PATH = BASE_DIR / "lstm_ready_aggregated.csv"
 
 LOOKBACK   = 24
-EPOCHS     = 40
+EPOCHS     = 40        # same as GRU
 BATCH_SIZE = 32
 LR         = 1e-3
 
-# Early stopping 
-PATIENCE   = 7     # stop if val loss doesn't improve for 7 consecutive epochs
-MIN_DELTA  = 1e-6  # minimum improvement to count as "better"
+PATIENCE  = 10         # same for both horizons (was 12 / 6)
+MIN_DELTA = 1e-6
 
 HORIZONS_CONFIG = {
-    "Short (H=5)":  {"horizon": 5,  "patience": 12},
-    "Long (H=10)":  {"horizon": 10, "patience": 6},
+    "Short (H=5)":  {"horizon": 5},
+    "Long (H=10)":  {"horizon": 10},
 }
 
-COLOR_ACTUAL    = "#6A0DAD" 
-COLOR_PREDICTED = "#FF69B4" 
-COLOR_TRAIN     = "#8A2BE2" 
+COLOR_ACTUAL    = "#6A0DAD"
+COLOR_PREDICTED = "#FF69B4"
+COLOR_TRAIN     = "#8A2BE2"
 COLOR_VAL       = "#FFC0CB"
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("Using device:", device)
 
 
-#LOAD DATA
+# Load data 
 
-df = pd.read_csv(FILE_PATH)
-
+df         = pd.read_csv(FILE_PATH)
 cpu_values = df[["cpu_usage"]].values.astype(np.float32)
 print("Total samples:", len(cpu_values))
 
 
-#HELPER FUNCTIONS
+#  Helper function
 
 def create_sequences(data, lookback, horizon):
     X, y = [], []
@@ -84,7 +82,7 @@ def print_metrics(y_true, y_pred, label=""):
     return mse, mae, mape
 
 
-#LSTM MODEL
+# LSTM model
 
 class LSTMModel(nn.Module):
     def __init__(self, horizon):
@@ -96,7 +94,7 @@ class LSTMModel(nn.Module):
             hidden_size=64,
             num_layers=2,
             batch_first=True,
-            dropout=0.2
+            dropout=0.2      
         )
         self.fc = nn.Linear(64, horizon * 1)
 
@@ -107,7 +105,7 @@ class LSTMModel(nn.Module):
         return out.view(-1, self.horizon, 1)
 
 
-# TRAIN / VALIDATION / TEST SPLIT
+# Train / val / test split
 
 n         = len(cpu_values)
 train_end = int(n * 0.80)
@@ -120,15 +118,16 @@ test_raw  = cpu_values[val_end:]
 print(f"\nTrain: {len(train_raw)} | Val: {len(val_raw)} | Test: {len(test_raw)}")
 
 
-#MAIN TRAINING LOOP
+#  Main training loop
 
 all_results = []
 
 for horizon_name, horizon_data in HORIZONS_CONFIG.items():
-    print(f"\nHorizon: {horizon_name}")
+    print(f"\n{'='*55}")
+    print(f"  Horizon: {horizon_name}")
+    print(f"{'='*55}")
 
     horizon = horizon_data["horizon"]
-    patience = horizon_data["patience"]
 
     scaler       = MinMaxScaler()
     train_scaled = scaler.fit_transform(train_raw)
@@ -160,13 +159,11 @@ for horizon_name, horizon_data in HORIZONS_CONFIG.items():
     train_losses = []
     val_losses   = []
 
-    # Early stopping state
     best_val_loss    = float('inf')
     patience_counter = 0
     best_epoch       = 0
-    best_model_path  = BASE_DIR / f"best_model_{horizon_name.split()[0].lower()}.pt"
+    best_model_path  = BASE_DIR / f"best_model_lstm_{horizon_name.split()[0].lower()}.pt"
 
-    # Training loop
     for epoch in range(1, EPOCHS + 1):
 
         # Training phase
@@ -181,7 +178,7 @@ for horizon_name, horizon_data in HORIZONS_CONFIG.items():
             predictions = model(X_batch)
             loss = criterion(predictions, y_batch)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+           
             optimizer.step()
 
             epoch_loss += loss.item()
@@ -189,7 +186,7 @@ for horizon_name, horizon_data in HORIZONS_CONFIG.items():
         train_loss = epoch_loss / len(train_loader)
         train_losses.append(train_loss)
 
-        # Validation phase
+        # Validation
         model.eval()
         with torch.no_grad():
             val_preds = model(X_val_t.to(device))
@@ -198,21 +195,21 @@ for horizon_name, horizon_data in HORIZONS_CONFIG.items():
 
         print(f"  Epoch {epoch:02d}/{EPOCHS} | Train Loss: {train_loss:.6f} | Val Loss: {val_loss:.6f}", end="")
 
-        # Early stopping check
+        # Early stopping
         if val_loss < best_val_loss - MIN_DELTA:
             best_val_loss    = val_loss
             patience_counter = 0
             best_epoch       = epoch
-            torch.save(model.state_dict(), best_model_path)  # save best weights
+            torch.save(model.state_dict(), best_model_path)
             print("  ✓ best model saved")
         else:
             patience_counter += 1
-            print(f"  (no improvement {patience_counter}/{patience})")
-            if patience_counter >= patience:
-                print(f"\n  ⚑ Early stopping triggered at epoch {epoch}. Best epoch: {best_epoch}")
+            print(f"  (no improvement {patience_counter}/{PATIENCE})")
+            if patience_counter >= PATIENCE:
+                print(f"\n  ⚑ Early stopping at epoch {epoch}. Best epoch: {best_epoch}")
                 break
 
-    # Restore best weights before evaluating on test set
+    # Restore best weights
     model.load_state_dict(torch.load(best_model_path))
     print(f"  Restored best model from epoch {best_epoch} (val loss: {best_val_loss:.6f})")
 
@@ -227,51 +224,44 @@ for horizon_name, horizon_data in HORIZONS_CONFIG.items():
     mse, mae, mape = print_metrics(y_test_inv, preds_test_inv, label="CPU Usage")
 
     all_results.append({
-        "Horizon"    : horizon_name,
-        "Model"      : "LSTM",
-        "Best Epoch" : best_epoch,
-        "MSE"        : mse,
-        "MAE"        : mae,
-        "MAPE (%)"   : mape
+        "Horizon"   : horizon_name,
+        "Model"     : "LSTM",
+        "Best Epoch": best_epoch,
+        "MSE"       : mse,
+        "MAE"       : mae,
+        "MAPE (%)"  : mape
     })
 
-    # PLOT 1: Actual vs Predicted
+    #  Plot 1: Actual vs Predict
     fig, ax = plt.subplots(figsize=(12, 4))
-
-    ax.plot(y_test_inv[:80, 0, 0],     label="Actual",    color=COLOR_ACTUAL,    linewidth=1.5)
-    ax.plot(preds_test_inv[:80, 0, 0], label="Predicted", color=COLOR_PREDICTED, linewidth=1.5, linestyle="--")
-
-    ax.set_title(f"LSTM Forecast — {horizon_name} | CPU Usage", fontsize=13, fontweight="bold")
-    ax.set_xlabel("Test Sample Index")
-    ax.set_ylabel("CPU Usage")
+    ax.plot(y_test_inv[:80, 0, 0],     label='Actual',    color=COLOR_ACTUAL,    linewidth=1.5)
+    ax.plot(preds_test_inv[:80, 0, 0], label='Predicted', color=COLOR_PREDICTED, linewidth=1.5, linestyle='--')
+    ax.set_title(f'LSTM Forecast — {horizon_name} | CPU Usage', fontsize=13, fontweight='bold')
+    ax.set_xlabel('Test Sample Index')
+    ax.set_ylabel('CPU Usage')
     ax.legend()
     ax.grid(True, alpha=0.3)
-
     plt.tight_layout()
     plt.savefig(BASE_DIR / f"lstm_forecast_{horizon_name.split()[0].lower()}.png", dpi=120)
     plt.show()
 
-    # PLOT 2: Training & Validation Loss
+    # Plot 2: Training & Validation Loss
     plt.figure(figsize=(8, 4))
-
-    plt.plot(train_losses, label="Train Loss", color=COLOR_TRAIN, linewidth=1.5)
-    plt.plot(val_losses,   label="Val Loss",   color=COLOR_VAL,   linewidth=1.5, linestyle="--")
-
-    # Mark the best epoch on the loss plot
-    plt.axvline(x=best_epoch - 1, color="gray", linestyle=":", linewidth=1.2, label=f"Best epoch ({best_epoch})")
-
-    plt.title(f"Training & Validation Loss — {horizon_name}", fontsize=13, fontweight="bold")
-    plt.xlabel("Epoch")
-    plt.ylabel("Loss (MSE)")
+    plt.plot(train_losses, label='Train Loss', color=COLOR_TRAIN, linewidth=1.5)
+    plt.plot(val_losses,   label='Val Loss',   color=COLOR_VAL,   linewidth=1.5, linestyle='--')
+    plt.axvline(x=best_epoch - 1, color='gray', linestyle=':', linewidth=1.2,
+                label=f'Best epoch ({best_epoch})')
+    plt.title(f'Training & Validation Loss — {horizon_name}', fontsize=13, fontweight='bold')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss (MSE)')
     plt.legend()
     plt.grid(True, alpha=0.3)
-
     plt.tight_layout()
     plt.savefig(BASE_DIR / f"lstm_loss_{horizon_name.split()[0].lower()}.png", dpi=120)
     plt.show()
 
 
-# 7. FINAL RESULTS TABLE
+# Final results table
 
 results_df = pd.DataFrame(all_results)
 print("\nFinal Results:")

@@ -17,7 +17,7 @@ BASE_DIR  = Path("/content/drive/MyDrive/project_5G")
 FILE_PATH = BASE_DIR / "lstm_ready_aggregated.csv"
 
 LOOKBACK   = 24
-EPOCHS     = 60
+EPOCHS     = 40
 BATCH_SIZE = 32
 LR         = 1e-3
 

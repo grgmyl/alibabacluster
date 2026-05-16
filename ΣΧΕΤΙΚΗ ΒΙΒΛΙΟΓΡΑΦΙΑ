@@ -1,5 +1,14 @@
 -ΠΗΓΕΣ :
 
 https://www.geeksforgeeks.org/deep-learning/introduction-deep-learning/
-https://www.geeksforgeeks.org/machine-learning/time-series-analysis-and-forecasting/
-https://www.geeksforgeeks.org/time-series-forecasting-using-pytorch/
+-https://www.geeksforgeeks.org/machine-learning/time-series-analysis-and-forecasting/
+-https://www.tensorflow.org/guide/keras/training_with_built_in_methods
+-https://youtu.be/_kp19PIVuXc?si=P-ac59BgloZep-a8,https://encord.com/blog/train-val-test-split
+-https://apxml.com/courses/rnns-and-sequence-modeling/chapter-7-implementing-lstm-gru/using-gru-layers
+-https://www.lightly.ai/blog/train-test-validation-split(test,train, split data)
+-https://www.geeksforgeeks.org/deep-learning/transformer-model-from-scratch-using-tensorflow/
+-https://ml-tutorials.readthedocs.io/en/latest/auto_examples/lstm_tensorflow_scratch.html
+-https://www.geeksforgeeks.org/machine-learning/getting-started-with-transformers/
+-https://www.tensorflow.org/api_docs/python/tfm/nlp/models/TransformerEncoder
+-https://machinelearningmastery.com/adam-optimization-algorithm-for-deep-learning/
+

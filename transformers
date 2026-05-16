@@ -1,0 +1,546 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import tensorflow as tf
+import time
+
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.metrics import mean_squared_error, mean_absolute_error
+
+from tensorflow.keras.models import Model
+from tensorflow.keras.layers import (
+    Input,
+    Dense,
+    Dropout,
+    LayerNormalization,
+    MultiHeadAttention,
+    Add,
+    Conv1D,
+    Embedding
+)
+
+from tensorflow.keras.callbacks import (
+    EarlyStopping,
+    ReduceLROnPlateau
+)
+
+from pathlib import Path
+
+
+
+# CONFIG
+
+
+BASE_DIR = Path("/content/drive/MyDrive/project_5G")
+
+FILE_PATH = BASE_DIR / "lstm_ready_aggregated.csv"
+
+SEQ_LEN = 36
+
+EPOCHS = 80
+
+BATCH_SIZE = 32
+
+D_MODEL = 32
+
+NUM_HEADS = 2
+
+FF_DIM = 64
+
+DROPOUT = 0.1
+
+LEARNING_RATE = 1e-4
+
+COLOR_ACTUAL = "#6A0DAD"
+
+COLOR_PREDICTED = "#FF69B4"
+
+COLOR_TRAIN = "#8A2BE2"
+
+COLOR_VAL = "#FFC0CB"
+
+
+
+# LOAD DATA
+
+
+df = pd.read_csv(FILE_PATH)
+
+data = df[['cpu_usage']].values.astype(np.float32)
+
+print("Total samples:", len(data))
+
+
+
+# CREATE SEQUENCES
+
+
+def create_sequences(data, seq_len, horizon):
+
+    X = []
+    y = []
+
+    for i in range(len(data) - seq_len - horizon + 1):
+
+        X.append(data[i:i + seq_len])
+
+        y.append(data[i + seq_len:i + seq_len + horizon])
+
+    return np.array(X), np.array(y)
+
+
+
+# METRICS
+
+
+def MAPE(y_true, y_pred):
+
+    return np.mean(
+        np.abs((y_true - y_pred) / (y_true + 1e-8))
+    ) * 100
+
+
+def print_metrics(y_true, y_pred, label=""):
+
+    y_true_flat = y_true.reshape(-1)
+
+    y_pred_flat = y_pred.reshape(-1)
+
+    mse = mean_squared_error(y_true_flat, y_pred_flat)
+
+    mae = mean_absolute_error(y_true_flat, y_pred_flat)
+
+    mape = MAPE(y_true_flat, y_pred_flat)
+
+    print(f"\n{label} Metrics:")
+
+    print(f"MSE  : {mse:.6f}")
+
+    print(f"MAE  : {mae:.6f}")
+
+    print(f"MAPE : {mape:.2f}%")
+
+    return mse, mae, mape
+
+
+
+# POSITIONAL EMBEDDING
+
+
+class PositionalEmbedding(tf.keras.layers.Layer):
+
+    def __init__(self, seq_len, d_model):
+
+        super().__init__()
+
+        self.position_embedding = Embedding(
+            input_dim=seq_len,
+            output_dim=d_model
+        )
+
+        self.seq_len = seq_len
+
+    def call(self, x):
+
+        positions = tf.range(
+            start=0,
+            limit=self.seq_len,
+            delta=1
+        )
+
+        position_embeddings = self.position_embedding(positions)
+
+        return x + position_embeddings
+
+
+
+# TRANSFORMER ENCODER
+
+
+def transformer_encoder(x):
+
+    # Multi-Head Attention
+
+    attention_output = MultiHeadAttention(
+        num_heads=NUM_HEADS,
+        key_dim=D_MODEL // NUM_HEADS,
+        dropout=DROPOUT
+    )(x, x)
+
+    attention_output = Dropout(DROPOUT)(attention_output)
+
+    x = Add()([x, attention_output])
+
+    x = LayerNormalization(epsilon=1e-6)(x)
+
+    # Feed Forward Network
+
+    ffn = Dense(FF_DIM, activation='relu')(x)
+
+    ffn = Dropout(DROPOUT)(ffn)
+
+    ffn = Dense(D_MODEL)(ffn)
+
+    ffn = Dropout(DROPOUT)(ffn)
+
+    x = Add()([x, ffn])
+
+    x = LayerNormalization(epsilon=1e-6)(x)
+
+    return x
+
+
+=
+# BUILD MODEL
+
+
+def build_transformer(horizon):
+
+    inputs = Input(shape=(SEQ_LEN, 1))
+
+    # Local Feature Extraction
+
+    x = Conv1D(
+        filters=D_MODEL,
+        kernel_size=3,
+        padding='same',
+        activation='relu'
+    )(inputs)
+
+    # Positional Encoding
+
+    x = PositionalEmbedding(
+        seq_len=SEQ_LEN,
+        d_model=D_MODEL
+    )(x)
+
+    # Transformer Blocks
+
+    x = transformer_encoder(x)
+
+    x = transformer_encoder(x)
+
+    # Last Time Step Representation
+
+    x = x[:, -1, :]
+
+    # Dense Head
+
+    x = Dense(32, activation='relu')(x)
+
+    x = Dropout(DROPOUT)(x)
+
+    outputs = Dense(horizon)(x)
+
+    # MODEL
+
+    model = Model(inputs, outputs)
+
+    optimizer = tf.keras.optimizers.Adam(
+        learning_rate=LEARNING_RATE,
+        clipnorm=1.0
+    )
+
+    model.compile(
+        optimizer=optimizer,
+        loss=tf.keras.losses.Huber(),
+        metrics=['mae']
+    )
+
+    return model
+
+
+
+# TRAIN + EVALUATE
+
+
+def run_transformer(data, horizon):
+
+    print("\n" + "=" * 60)
+
+    print(f"Transformer Forecast — Horizon={horizon}")
+
+    print("=" * 60)
+
+  
+    # SPLIT DATA
+  
+
+    n = len(data)
+
+    train_end = int(n * 0.8)
+
+    val_end = int(n * 0.9)
+
+    train_raw = data[:train_end]
+
+    val_raw = data[train_end:val_end]
+
+    test_raw = data[val_end:]
+
+    print(f"Train: {len(train_raw)}")
+
+    print(f"Val  : {len(val_raw)}")
+
+    print(f"Test : {len(test_raw)}")
+=
+    # SCALE
+   
+
+    scaler = MinMaxScaler()
+
+    train_scaled = scaler.fit_transform(train_raw)
+
+    val_scaled = scaler.transform(val_raw)
+
+    test_scaled = scaler.transform(test_raw)
+
+    # CREATE SEQUENCES
+   
+
+    X_train, y_train = create_sequences(
+        train_scaled,
+        SEQ_LEN,
+        horizon
+    )
+
+    X_val, y_val = create_sequences(
+        val_scaled,
+        SEQ_LEN,
+        horizon
+    )
+
+    X_test, y_test = create_sequences(
+        test_scaled,
+        SEQ_LEN,
+        horizon
+    )
+
+    y_train = y_train.reshape(len(y_train), horizon)
+
+    y_val = y_val.reshape(len(y_val), horizon)
+
+    y_test = y_test.reshape(len(y_test), horizon)
+
+    print(f"\nX_train: {X_train.shape}")
+
+    print(f"X_val  : {X_val.shape}")
+
+    print(f"X_test : {X_test.shape}")
+
+    
+    # BUILD MODEL
+   
+
+    model = build_transformer(horizon)
+
+    model.summary()
+
+    
+    # CALLBACKS
+   
+
+    early_stop = EarlyStopping(
+        monitor='val_loss',
+        patience=12,
+        restore_best_weights=True,
+        verbose=1
+    )
+
+    reduce_lr = ReduceLROnPlateau(
+        monitor='val_loss',
+        factor=0.5,
+        patience=5,
+        min_lr=1e-6,
+        verbose=1
+    )
+
+
+    # TRAIN
+   
+
+    history = model.fit(
+        X_train,
+        y_train,
+        validation_data=(X_val, y_val),
+        epochs=EPOCHS,
+        batch_size=BATCH_SIZE,
+        callbacks=[early_stop, reduce_lr],
+        verbose=1
+    )
+
+   
+    # BEST EPOCH
+   
+
+    best_epoch = (
+        np.argmin(history.history['val_loss']) + 1
+    )
+
+    print(
+        f"\nBest epoch: {best_epoch} "
+        f"(val loss: {min(history.history['val_loss']):.6f})"
+    )
+
+ 
+    # INFERENCE TIME
+   
+
+    start_time = time.time()
+
+    pred_scaled = model.predict(X_test)
+
+    end_time = time.time()
+
+    inference_time = end_time - start_time
+
+    print(
+        f"\nInference Time (H={horizon}): "
+        f"{inference_time:.6f} seconds"
+    )
+
+ 
+    # INVERSE SCALE
+    
+
+    y_test_inv = scaler.inverse_transform(y_test)
+
+    pred_inv = scaler.inverse_transform(pred_scaled)
+
+  =
+    # METRICS
+ 
+
+    mse, mae, mape = print_metrics(
+        y_test_inv,
+        pred_inv,
+        label="CPU Usage"
+    )
+
+  
+    # PLOT PREDICTIONS
+ 
+
+    plt.figure(figsize=(12, 5))
+
+    plt.plot(
+        y_test_inv[:100, 0],
+        label='Actual',
+        color=COLOR_ACTUAL,
+        linewidth=2
+    )
+
+    plt.plot(
+        pred_inv[:100, 0],
+        label='Predicted',
+        color=COLOR_PREDICTED,
+        linewidth=2
+    )
+
+    plt.title(
+        f'Transformer Forecast — Horizon={horizon}'
+    )
+
+    plt.xlabel('Sample')
+
+    plt.ylabel('CPU Usage')
+
+    plt.legend()
+
+    plt.grid(True)
+
+    plt.show()
+
+ 
+    # PLOT LOSS
+ 
+
+    plt.figure(figsize=(10, 4))
+
+    plt.plot(
+        history.history['loss'],
+        label='Train Loss',
+        color=COLOR_TRAIN
+    )
+
+    plt.plot(
+        history.history['val_loss'],
+        label='Validation Loss',
+        color=COLOR_VAL
+    )
+
+    plt.axvline(
+        x=best_epoch - 1,
+        color='gray',
+        linestyle=':',
+        linewidth=1.2,
+        label=f'Best epoch ({best_epoch})'
+    )
+
+    plt.title(
+        f'Training vs Validation Loss — H={horizon}'
+    )
+
+    plt.xlabel('Epoch')
+
+    plt.ylabel('Loss')
+
+    plt.legend()
+
+    plt.grid(True)
+
+    plt.show()
+
+    return mse, mae, mape, inference_time
+
+
+
+# RUN
+
+
+results = []
+
+for h in [5, 10]:
+
+    mse, mae, mape, inference_time = run_transformer(
+        data,
+        horizon=h
+    )
+
+    results.append({
+
+        "Model": "Transformer",
+
+        "Horizon": h,
+
+        "Inference Time (s)": inference_time,
+
+        "MSE": mse,
+
+        "MAE": mae,
+
+        "MAPE (%)": mape
+    })
+
+
+# RESULTS
+
+
+results_df = pd.DataFrame(results)
+
+print("\n" + "=" * 60)
+
+print("FINAL RESULTS")
+
+print("=" * 60)
+
+print(results_df)
+
+results_df.to_csv(
+    BASE_DIR / "transformer_results.csv",
+    index=False
+)
+
+print("\nSaved: transformer_results.csv")
+
+print("=" * 60)
